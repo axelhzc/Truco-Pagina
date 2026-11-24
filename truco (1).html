@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Truco vs Bot</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,sans-serif;background:#0b3d2e;color:#fff;text-align:center;padding:12px}
+  h1{margin:4px 0 8px}
+  #marcador{font-size:1.2rem;margin-bottom:8px}
+  #marcador b{font-size:1.6rem}
+  #mesa{background:#14664a;border-radius:16px;padding:12px;max-width:560px;margin:auto}
+  .fila{display:flex;justify-content:center;gap:8px;min-height:92px;margin:6px 0}
+  .carta{width:60px;height:88px;border-radius:8px;background:#fff;color:#222;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;font-size:1.4rem;box-shadow:0 2px 6px #0006;user-select:none}
+  .carta b{font-size:1.6rem}
+  .carta.espada{color:#1d4ed8}.carta.basto{color:#15803d}.carta.oro{color:#b45309}.carta.copa{color:#b91c1c}
+  .carta.tapada{background:repeating-linear-gradient(45deg,#7f1d1d,#7f1d1d 6px,#991b1b 6px,#991b1b 12px);border:3px solid #fff}
+  #tuMano .carta{cursor:pointer;transition:transform .15s}
+  #tuMano .carta:hover{transform:translateY(-8px)}
+  #msg{min-height:28px;margin:10px;font-size:1.1rem;font-weight:600}
+  #acciones,#prompt{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:8px}
+  button{padding:10px 14px;border:0;border-radius:8px;font-size:1rem;cursor:pointer;background:#fbbf24;color:#222;font-weight:600}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  #prompt p{width:100%;margin:0;font-size:1.1rem}
+  #prompt button{background:#38bdf8}
+  #nueva{display:none;background:#4ade80}
+  small{opacity:.7}
+</style>
+</head>
+<body>
+  <h1>🃏 Truco</h1>
+  <div id="marcador">Vos: <b id="pYou">0</b> &nbsp;|&nbsp; Bot: <b id="pBot">0</b> <small>(a 15)</small></div>
+
+  <div id="mesa">
+    <div class="fila" id="botMano"></div>
+    <div class="fila" id="botMesa"></div>
+    <div class="fila" id="tuMesa"></div>
+    <div class="fila" id="tuMano"></div>
+  </div>
+
+  <div id="msg"></div>
+  <div id="prompt"></div>
+  <div id="acciones">
+    <button id="bTruco" onclick="clickTruco()">Truco</button>
+    <button id="bEnvido" onclick="clickEnvido('envido')">Envido</button>
+    <button id="bReal" onclick="clickEnvido('real')">Real envido</button>
+    <button id="bFalta" onclick="clickEnvido('falta')">Falta envido</button>
+    <button id="bMazo" onclick="alMazo()">Al mazo</button>
+  </div>
+  <button id="nueva" onclick="nuevaPartida()">Nueva partida</button>
+
+<script>
+// ===================== CONFIGURACIÓN =====================
+const META = 15;                                   // puntos para ganar
+const NT = ['', 'Truco', 'Retruco', 'Vale cuatro'];
+const SIM = { espada: '⚔️', basto: '🌿', oro: '🪙', copa: '🍷' };
+let S = { pts: { you: 0, bot: 0 }, mano: 'you', fin: false, ocupado: true, turno: 'you',
+          h: { you: [], bot: [] }, mesa: { you: [], bot: [] }, bazas: [], truco: 0, trucoDe: null,
+          envidoHecho: false, orig: { you: [], bot: [] } };
+
+// ===================== UTILIDADES =====================
+const $ = id => document.getElementById(id);
+const esperar = ms => new Promise(r => setTimeout(r, ms));
+const nom = w => (w === 'you' ? 'Vos' : 'Bot');
+const otro = w => (w === 'you' ? 'bot' : 'you');
+const msg = t => { $('msg').textContent = t; };
+
+function mazoNuevo() {
+  const m = [];
+  for (const p in SIM) for (const n of [1, 2, 3, 4, 5, 6, 7, 10, 11, 12]) m.push({ n, p });
+  for (let i = m.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [m[i], m[j]] = [m[j], m[i]];
+  }
+  return m;
+}
+
+// Jerarquía del truco (mayor número = carta más fuerte)
+function fuerza(c) {
+  const { n, p } = c;
+  if (n === 1 && p === 'espada') return 14;
+  if (n === 1 && p === 'basto') return 13;
+  if (n === 7 && p === 'espada') return 12;
+  if (n === 7 && p === 'oro') return 11;
+  if (n === 3) return 10;
+  if (n === 2) return 9;
+  if (n === 1) return 8;
+  if (n === 12) return 7;
+  if (n === 11) return 6;
+  if (n === 10) return 5;
+  if (n === 7) return 4;
+  return n - 3; // 6,5,4
+}
+
+// Tanto del envido
+function tantoDe(h) {
+  const v = c => (c.n >= 10 ? 0 : c.n);
+  let best = 0;
+  h.forEach(c => (best = Math.max(best, v(c))));
+  for (let i = 0; i < h.length; i++)
+    for (let j = i + 1; j < h.length; j++)
+      if (h[i].p === h[j].p) best = Math.max(best, 20 + v(h[i]) + v(h[j]));
+  return best;
+}
+
+// ===================== DIBUJAR =====================
+function cartaEl(c, tapada, click) {
+  const d = document.createElement('div');
+  d.className = 'carta ' + (tapada ? 'tapada' : c.p);
+  if (!tapada) d.innerHTML = `<b>${c.n}</b><span>${SIM[c.p]}</span>`;
+  if (click) d.onclick = click;
+  return d;
+}
+function fill(id, els) { const f = $(id); f.innerHTML = ''; els.forEach(e => f.appendChild(e)); }
+
+function render() {
+  $('pYou').textContent = S.pts.you;
+  $('pBot').textContent = S.pts.bot;
+  fill('botMano', S.h.bot.map(() => cartaEl(null, true)));
+  fill('botMesa', S.mesa.bot.map(c => cartaEl(c)));
+  fill('tuMesa', S.mesa.you.map(c => cartaEl(c)));
+  fill('tuMano', S.h.you.map((c, i) => cartaEl(c, false, () => tirar(i))));
+
+  const mi = puedo();
+  const primera = S.bazas.length === 0 && S.mesa.you.length === 0 && !S.envidoHecho && S.truco === 0;
+  $('bTruco').textContent = S.truco >= 3 ? 'Vale cuatro' : NT[S.truco + 1];
+  $('bTruco').disabled = !mi || S.truco >= 3 || S.trucoDe === 'you';
+  ['bEnvido', 'bReal', 'bFalta'].forEach(id => ($(id).disabled = !mi || !primera));
+  $('bMazo').disabled = !mi;
+}
+
+function puedo() { return S.turno === 'you' && !S.ocupado && !S.fin; }
+
+// ===================== FLUJO DE LA PARTIDA =====================
+function nuevaPartida() {
+  S.pts = { you: 0, bot: 0 };
+  S.fin = false;
+  S.mano = 'you';
+  $('nueva').style.display = 'none';
+  repartir();
+}
+
+async function repartir() {
+  const m = mazoNuevo();
+  S.h = { you: m.slice(0, 3), bot: m.slice(3, 6) };
+  S.orig = { you: [...S.h.you], bot: [...S.h.bot] };
+  S.mesa = { you: [], bot: [] };
+  S.bazas = [];
+  S.truco = 0;
+  S.trucoDe = null;
+  S.envidoHecho = false;
+  S.turno = S.mano;
+  S.ocupado = false;
+  msg(`Nueva mano. Empieza: ${nom(S.mano)}`);
+  render();
+  if (S.turno === 'bot') await turnoBot();
+}
+
+function jugarCarta(w, i) {
+  const c = S.h[w].splice(i, 1)[0];
+  S.mesa[w].push(c);
+}
+
+async function tirar(i) {
+  if (!puedo()) return;
+  S.ocupado = true;
+  jugarCarta('you', i);
+  render();
+  await despuesDeJugar('you');
+}
+
+function ganadorMano() {
+  const b = S.bazas;
+  const w = p => b.filter(x => x === p).length;
+  if (w('you') === 2) return 'you';
+  if (w('bot') === 2) return 'bot';
+  if (b.length === 2 && b[0] === 'parda' && b[1] !== 'parda') return b[1];
+  if (b.length === 2 && b[1] === 'parda' && b[0] !== 'parda') return b[0];
+  if (b.length === 3) return b.find(x => x !== 'parda') || S.mano;
+  return null;
+}
+
+async function despuesDeJugar(w) {
+  if (S.mesa.you.length === S.mesa.bot.length) {      // se completó la baza
+    const a = fuerza(S.mesa.you.at(-1));
+    const b = fuerza(S.mesa.bot.at(-1));
+    const g = a > b ? 'you' : b > a ? 'bot' : 'parda';
+    S.bazas.push(g);
+    msg(g === 'parda' ? 'Parda (empate)' : `${nom(g)} gana la baza`);
+    render();
+    await esperar(1300);
+    const gm = ganadorMano();
+    if (gm) return terminarMano(gm);
+    S.turno = g === 'parda' ? S.mano : g;
+  } else {
+    S.turno = otro(w);
+  }
+  S.ocupado = false;
+  render();
+  if (S.turno === 'bot') await turnoBot();
+}
+
+function sumar(w, p) {
+  S.pts[w] += p;
+  if (S.pts[w] >= META) {
+    S.fin = true;
+    S.ocupado = true;
+    msg(w === 'you' ? '🎉 ¡Ganaste la partida!' : '😵 El bot ganó la partida');
+    $('nueva').style.display = 'inline-block';
+  }
+}
+
+async function terminarMano(g, p) {
+  if (p === undefined) p = S.truco ? S.truco + 1 : 1;
+  msg(`${nom(g)} se lleva la mano (+${p})`);
+  sumar(g, p);
+  render();
+  if (S.fin) return;
+  await esperar(1800);
+  S.mano = otro(S.mano);
+  await repartir();
+}
+
+// ===================== CANTOS =====================
+function preguntar(texto, ops) {
+  return new Promise(res => {
+    const p = $('prompt');
+    p.innerHTML = '<p>' + texto + '</p>';
+    ops.forEach(([label, val]) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.onclick = () => { p.innerHTML = ''; res(val); };
+      p.appendChild(b);
+    });
+  });
+}
+
+// Fuerza estimada de la mano del bot
+function fb() {
+  const f = S.orig.bot.map(fuerza).sort((a, b) => b - a);
+  return (f[0] * 2 + f[1] + f[2] * 0.5) / 3.5;
+}
+function respBotTruco(nivel) {
+  const gano = S.bazas.filter(x => x === 'bot').length - S.bazas.filter(x => x === 'you').length;
+  const v = fb() + gano * 1.5;
+  if (nivel < 3 && v >= 10.5 && Math.random() < 0.45) return 'sube';
+  if (v >= 7 || Math.random() < 0.15) return 'quiero';
+  return 'no';
+}
+
+async function cantarTruco(who) {
+  let nivel = S.truco + 1;
+  let cantor = who;
+  while (true) {
+    const resp = otro(cantor);
+    msg(`${nom(cantor)}: ¡${NT[nivel]}!`);
+    render();
+    await esperar(900);
+    let r;
+    if (resp === 'bot') r = respBotTruco(nivel);
+    else {
+      const ops = [['Quiero', 'quiero'], ['No quiero', 'no']];
+      if (nivel < 3) ops.push([NT[nivel + 1], 'sube']);
+      r = await preguntar(`El bot canta ${NT[nivel]}`, ops);
+    }
+    if (r === 'no') {
+      msg(`${nom(resp)}: No quiero`);
+      await esperar(900);
+      await terminarMano(cantor, nivel);
+      return 'no';
+    }
+    if (r === 'quiero') {
+      msg(`${nom(resp)}: ¡Quiero!`);
+      S.truco = nivel;
+      S.trucoDe = cantor;
+      render();
+      await esperar(700);
+      return 'ok';
+    }
+    S.truco = nivel;       // 'sube': acepta y sube
+    S.trucoDe = cantor;
+    nivel++;
+    cantor = resp;
+  }
+}
+
+async function cantarEnvido(who, tipo) {
+  S.envidoHecho = true;
+  const nombres = { envido: 'Envido', real: 'Real envido', falta: 'Falta envido' };
+  msg(`${nom(who)}: ¡${nombres[tipo]}!`);
+  render();
+  await esperar(900);
+  const pts = tipo === 'envido' ? 2 : tipo === 'real' ? 3 : META - Math.max(S.pts.you, S.pts.bot);
+  let r;
+  if (who === 'you') {
+    const tb = tantoDe(S.orig.bot);
+    const minimo = tipo === 'falta' ? 29 : tipo === 'real' ? 27 : 26;
+    r = tb >= minimo || Math.random() < 0.12 ? 'quiero' : 'no';
+  } else {
+    r = await preguntar(`El bot canta ${nombres[tipo]}`, [['Quiero', 'quiero'], ['No quiero', 'no']]);
+  }
+  if (r === 'no') {
+    msg(`${nom(otro(who))}: No quiero (+1 para ${nom(who)})`);
+    sumar(who, 1);
+    render();
+    await esperar(1200);
+    return;
+  }
+  const ty = tantoDe(S.orig.you), tb = tantoDe(S.orig.bot);
+  const g = ty > tb ? 'you' : tb > ty ? 'bot' : S.mano;
+  msg(`Vos: ${ty} — Bot: ${tb}. Gana ${nom(g)} (+${pts})`);
+  sumar(g, pts);
+  render();
+  await esperar(2200);
+}
+
+// ===================== BOTONES DEL JUGADOR =====================
+async function clickTruco() {
+  if (!puedo()) return;
+  S.ocupado = true;
+  render();
+  const r = await cantarTruco('you');
+  if (r === 'ok' && !S.fin) { S.ocupado = false; render(); }
+}
+async function clickEnvido(tipo) {
+  if (!puedo()) return;
+  S.ocupado = true;
+  render();
+  await cantarEnvido('you', tipo);
+  if (!S.fin) { S.ocupado = false; render(); }
+}
+async function alMazo() {
+  if (!puedo()) return;
+  S.ocupado = true;
+  await terminarMano('bot');
+}
+
+// ===================== TURNO DEL BOT =====================
+async function turnoBot() {
+  S.ocupado = true;
+  render();
+  await esperar(900);
+
+  const primera = S.bazas.length === 0 && S.mesa.bot.length === 0;
+  if (primera && !S.envidoHecho && S.truco === 0 && tantoDe(S.orig.bot) >= 27 && Math.random() < 0.6) {
+    await cantarEnvido('bot', 'envido');
+    if (S.fin) return;
+    await esperar(500);
+  }
+
+  if (S.truco < 3 && S.trucoDe !== 'bot') {
+    const v = fb();
+    const prob = v >= 10 ? 0.35 : v < 6 ? 0.05 : 0.1;
+    if (Math.random() < prob) {
+      const r = await cantarTruco('bot');
+      if (r === 'no' || S.fin) return;
+    }
+  }
+
+  // Elegir carta
+  const h = S.h.bot;
+  const ord = h.map((c, i) => i).sort((a, b) => fuerza(h[a]) - fuerza(h[b]));
+  const jugada = S.mesa.you.length > S.mesa.bot.length ? S.mesa.you.at(-1) : null;
+  let idx;
+  if (jugada) {
+    const gana = ord.find(i => fuerza(h[i]) > fuerza(jugada));
+    idx = gana !== undefined ? gana : ord[0];
+  } else {
+    idx = Math.random() < 0.3 ? ord[Math.floor(ord.length / 2)] : ord[ord.length - 1];
+  }
+  jugarCarta('bot', idx);
+  render();
+  await despuesDeJugar('bot');
+}
+
+// ===================== INICIO =====================
+repartir();
+</script>
+</body>
+</html>
